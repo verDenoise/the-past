@@ -1,0 +1,187 @@
+#include "mpi.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <iostream>
+#include <fstream>
+
+using namespace std;
+
+#define MAXSIZE 10 				
+#define MAXDELTA 0.001 			
+#define MAXITERATIONS 100000 	
+#define TAG 404 				
+
+
+float jacobi_sum(float matrixA[][MAXSIZE], float oldX[], int i, int kolvo);
+float jacobi_delta(float newX[], float oldX[], int kolvo);
+
+float jacobi_sum(float matrixA[][MAXSIZE], float oldX[], int i, int kolvo)
+{
+	int j;
+	float sum = 0.0;
+
+	for (j = 0; j < kolvo; j++)
+		if (i != j)
+			sum += matrixA[i][j] * oldX[j];
+	return sum;
+}
+
+float jacobi_delta(float newX[], float oldX[], int kolvo)
+{
+	float maxDelta = 0.0, delta;
+
+	for (int i = 0; i < kolvo; i++)
+	{
+		delta = abs(newX[i] - oldX[i]);
+
+		if (delta > maxDelta)
+			maxDelta = delta;
+	}
+
+	return maxDelta;
+}
+
+
+void main(int argc, char* argv[])
+{
+	
+	int rank, numprocs, kolvo, iteration, i, j, myWave = 1;
+	float matrixA[MAXSIZE][MAXSIZE], vectorB[MAXSIZE], tempX1[MAXSIZE], tempX2[MAXSIZE], myInitGuess;
+	float* oldX, * newX, * tempFloatPointer;
+
+	MPI_Init(&argc, &argv);
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &numprocs);
+	
+	fprintf(stdout, "Process %d of %d \n", rank, numprocs);
+	
+
+	if (rank == 0)
+	{	
+		printf("Enter kolvo ur. of system [integer up to %d]:\n", MAXSIZE);
+		scanf_s("%d", &kolvo);
+	
+		if (kolvo > MAXSIZE || kolvo < 1)
+		{
+			printf("Kolvo ur of system must be between 1 and %d\nTry again\n", MAXSIZE);
+			MPI_Finalize();
+			return;
+		}
+		
+	}
+	
+
+	MPI_Bcast(&kolvo, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+	if (rank == 0)
+	{
+		printf("Enter the matrix A:\n");
+		for (i = 0; i < kolvo; i++)
+			for (j = 0; j < kolvo; j++)
+				scanf_s("%f", &matrixA[i][j]);
+
+		printf("Enter the vector b:\n");
+		for (i = 0; i < kolvo; i++)
+			scanf_s("%f", &vectorB[i]);
+	}
+
+	MPI_Bcast(&matrixA, kolvo * MAXSIZE, MPI_FLOAT, 0, MPI_COMM_WORLD);
+	MPI_Bcast(&vectorB, kolvo, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+	if (rank == 0)
+	{
+		float maxNumInA = matrixA[0][0];
+		float maxNumInB = vectorB[0];
+
+		for (i = 0; i < kolvo; i++)
+		{
+			for (j = 0; j < kolvo; j++)
+				if (matrixA[i][j] > maxNumInA)
+					maxNumInA = matrixA[i][j];
+			if (vectorB[i] > maxNumInB)
+				maxNumInB = vectorB[i];
+		}
+		if (maxNumInA > maxNumInB)
+			myInitGuess = maxNumInA;
+		else
+			myInitGuess = maxNumInB;
+	}
+	MPI_Bcast(&myInitGuess, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
+	myInitGuess *= (float)rank / (float)numprocs;
+	if (rank % 2 == 1)
+		myWave *= -1;
+	else
+		myWave = 1;
+	myInitGuess *= myWave;
+	//printf("@ %d myInitGuess = %f\n", rank, myInitGuess);
+	for (i = 0; i < kolvo; i++)
+		tempX1[i] = myInitGuess;
+
+	newX = tempX1;
+	oldX = tempX2;
+
+	iteration = 0;
+	do
+	{
+		iteration++;
+
+		tempFloatPointer = oldX;
+		oldX = newX;
+		newX = tempFloatPointer;
+
+		for (i = 0; i < kolvo; i++)
+		{
+			newX[i] = (vectorB[i] - jacobi_sum(matrixA, oldX, i, kolvo)) / matrixA[i][i];
+			//printf("@iteration(%d), processor(%d), oldX[%d] (%f)\n", iteration, rank, i, oldX[i]);
+			//printf("@iteration(%d), processor(%d), newX[%d] (%f)\n", iteration, rank, i, newX[i]);
+		}
+
+	} while ((iteration < MAXITERATIONS) && (jacobi_delta(newX, oldX, kolvo) > MAXDELTA));
+
+	if (jacobi_delta(newX, oldX, kolvo) <= MAXDELTA)
+	{
+		if (rank == 0) 
+		{
+			for (int i = 1; i < numprocs; ++i)
+				MPI_Send(newX, kolvo, MPI_FLOAT, 0, TAG, MPI_COMM_WORLD);
+				for (i = 0; i < kolvo; i++)
+				printf("@processor(%d), has found answer with newX[%d] = %f\n", rank, i, newX[i]);
+		}
+	}
+
+	MPI_Barrier(MPI_COMM_WORLD);
+
+	if (rank == 0)
+	{
+		MPI_Request myRequest;
+		int myRequestHasRecieved = 0;
+		float* vectorX = NULL;
+
+		MPI_Irecv(&tempX1, kolvo, MPI_FLOAT, MPI_ANY_SOURCE, TAG, MPI_COMM_WORLD, &myRequest);
+		MPI_Test(&myRequest, &myRequestHasRecieved, MPI_STATUS_IGNORE);
+		
+
+		if (myRequestHasRecieved == NULL) 
+		{
+			vectorX = tempX1;
+			for (i = 0; i < kolvo; i++)
+			{
+				printf("@processor(%d), has tempX1[%d] = %f\n", rank, i, tempX1[i]);
+				printf("@processor(%d), while vectorX[%d] = %f\n", rank, i, vectorX[i]);
+			}
+		}else printf("NOT TRUE\n");
+
+		if (vectorX != NULL)
+		{
+			printf("The solution for vector x is:\n");
+			for (i = 0; i < kolvo; i++)
+				printf("x%d = %3.3f\n", i + 1, vectorX[i]);			
+			printf("\n");
+		}
+		else
+			printf("Did %d iterations with %1.3f error, NO SOLUTION!\n", MAXITERATIONS, MAXDELTA);
+	}
+
+	MPI_Finalize();
+}
